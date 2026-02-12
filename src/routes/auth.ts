@@ -9,7 +9,6 @@ import { UserModel, type UserRole } from "../models/User";
 import { TeacherProfileModel } from "../models/TeacherProfile";
 import { StudentProfileModel } from "../models/StudentProfile";
 import { EmailVerificationCodeModel } from "../models/EmailVerificationCode";
-import { sendVerificationCodeEmail } from "../services/mailer";
 import { asyncHandler } from "../utils/asyncHandler";
 import { google } from "googleapis";
 import { encryptString } from "../utils/crypto";
@@ -62,14 +61,11 @@ authRouter.post("/register", asyncHandler(async (req, res) => {
       },
       { upsert: true, new: true }
     );
-    void sendVerificationCodeEmail(existing.email, code).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error("[email] Unexpected error while sending verification email.", err);
-    });
-
     return res.json({
       pendingVerification: true,
       user: { id: String(existing._id), role: existing.role, email: existing.email },
+      // Temporary: return code to frontend (do not email)
+      verificationCode: code,
     });
   }
 
@@ -107,12 +103,13 @@ authRouter.post("/register", asyncHandler(async (req, res) => {
     },
     { upsert: true, new: true }
   );
-  void sendVerificationCodeEmail(user.email, code).catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error("[email] Unexpected error while sending verification email.", err);
-  });
 
-  return res.status(201).json({ pendingVerification: true, user: { id: String(user._id), role: user.role, email: user.email } });
+  // Temporary: return code to frontend (do not email)
+  return res.status(201).json({
+    pendingVerification: true,
+    user: { id: String(user._id), role: user.role, email: user.email },
+    verificationCode: code,
+  });
 }));
 
 const VerifySchema = z.object({
@@ -192,12 +189,8 @@ authRouter.post("/resend-code", asyncHandler(async (req, res) => {
     },
     { upsert: true, new: true }
   );
-
-  void sendVerificationCodeEmail(user.email, code).catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error("[email] Unexpected error while sending verification email.", err);
-  });
-  return res.json({ ok: true });
+  // Temporary: return code to frontend (do not email)
+  return res.json({ ok: true, verificationCode: code });
 }));
 
 const LoginSchema = z.object({

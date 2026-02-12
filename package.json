@@ -31,6 +31,7 @@
     "@types/jsonwebtoken": "^9.0.6",
     "@types/morgan": "^1.9.9",
     "@types/node": "^20.11.30",
+    "@vercel/node": "^3.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }

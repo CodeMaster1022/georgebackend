@@ -1,0 +1,67 @@
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import morgan from "morgan";
+
+import { env } from "./config/env";
+import { connectDb } from "./config/db";
+
+import { healthRouter } from "./routes/health";
+import { authRouter } from "./routes/auth";
+import { teachersRouter } from "./routes/teachers";
+import { sessionsRouter } from "./routes/sessions";
+import { bookingsRouter } from "./routes/bookings";
+import { creditsRouter } from "./routes/credits";
+import { integrationsRouter } from "./routes/integrations";
+import { teacherRouter } from "./routes/teacher";
+import { bbbRouter } from "./routes/bbb";
+
+async function main() {
+  await connectDb();
+
+  const app = express();
+  app.disable("x-powered-by");
+
+  app.use(helmet());
+  app.use(
+    cors({
+      origin: env.CORS_ORIGIN,
+      credentials: true,
+    })
+  );
+  app.use(express.json({ limit: "1mb" }));
+  app.use(morgan("dev"));
+
+  app.use("/health", healthRouter);
+  app.use("/auth", authRouter);
+  app.use("/teachers", teachersRouter);
+  app.use("/sessions", sessionsRouter);
+  app.use("/bookings", bookingsRouter);
+  app.use("/credits", creditsRouter);
+  app.use("/integrations", integrationsRouter);
+  app.use("/teacher", teacherRouter);
+  app.use("/bbb", bbbRouter);
+
+  app.use((req, res) => {
+    res.status(404).json({ error: "Not Found" });
+  });
+
+  // Error handler (prevents crashes from async route errors)
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    // eslint-disable-next-line no-console
+    console.error(err);
+    res.status(500).json({ error: "Internal Server Error" });
+  });
+
+  app.listen(env.PORT, () => {
+    // eslint-disable-next-line no-console
+    console.log(`Backend listening on http://localhost:${env.PORT}`);
+  });
+}
+
+main().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error(err);
+  process.exit(1);
+});
+

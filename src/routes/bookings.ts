@@ -204,8 +204,8 @@ bookingsRouter.post("/", asyncHandler(async (req, res) => {
     // If booking succeeded, create a BBB meeting and store a role-aware join link.
     if (result.status === 201 && createdBookingId) {
       try {
-        const bbbBaseUrl = "https://app.bbbserver.com/bbb-integration-v2/6cba79fd-ad4e-4b55-b270-b091a89338ab/api"
-        const secret = "2499a6b9-0214-4c72-a40f-9044821e74d1"
+        const bbbBaseUrl = env.BBB_BASE_URL ? normalizeBbbBaseUrl(env.BBB_BASE_URL) : "";
+        const secret = (env.BBB_SHARED_SECRET || "").trim();
         if (!bbbBaseUrl || !secret) {
           result.body.bbb = { created: false, reason: "bbb_not_configured" };
         } else {

@@ -21,7 +21,8 @@ teacherRouter.use(requireAuth, requireRole("teacher"));
 
 async function ensureTeacherProfileId(userId: string, email: string) {
   const existing = await TeacherProfileModel.findOne({ userId }).select("_id").lean();
-  if (existing?._id) return String(existing._id);
+  // Fix for _id maybe absent on array types due to TS inference/lint: ensure not an array
+  if (existing && typeof existing === "object" && "_id" in existing && existing._id) return String(existing._id);
 
   // Backward-compat / recovery: if a teacher user exists without a profile, create it.
   try {
@@ -32,11 +33,18 @@ async function ensureTeacherProfileId(userId: string, email: string) {
     return String(created._id);
   } catch {
     const again = await TeacherProfileModel.findOne({ userId }).select("_id").lean();
-    return again?._id ? String(again._id) : null;
+    if (
+      again &&
+      typeof again === "object" &&
+      !Array.isArray(again) &&
+      "_id" in again &&
+      again._id
+    ) {
+      return String((again as { _id: unknown })._id);
+    }
+    return null;
   }
 }
-
-// -----------------------
 // Profile
 // -----------------------
 teacherRouter.get(
@@ -384,8 +392,12 @@ teacherRouter.post(
     const teacherId = await ensureTeacherProfileId(req.user!.id, req.user!.email);
     if (!teacherId) return res.status(404).json({ error: "Teacher profile not found" });
 
-    const booking = await BookingModel.findOne({ _id: parsed.data.bookingId, teacherId }).lean();
-    if (!booking) return res.status(404).json({ error: "Booking not found" });
+    const bookingRaw = await BookingModel.findOne({ _id: parsed.data.bookingId, teacherId }).lean();
+    if (!bookingRaw || Array.isArray(bookingRaw)) return res.status(404).json({ error: "Booking not found" });
+
+    // Mongoose typing in this repo sometimes widens `lean()` results to `doc | doc[]`.
+    // Narrow it so TS knows `studentUserId` exists on a single booking document.
+    const booking = bookingRaw as { _id: Types.ObjectId; studentUserId?: unknown };
 
     const now = new Date();
     const report = await ClassReportModel.findOneAndUpdate(
@@ -393,7 +405,7 @@ teacherRouter.post(
       {
         $set: {
           teacherId: new Types.ObjectId(teacherId),
-          studentUserId: booking.studentUserId,
+          studentUserId: booking.studentUserId ? new Types.ObjectId(String(booking.studentUserId)) : undefined,
           summary: parsed.data.summary ?? "",
           homework: parsed.data.homework ?? "",
           strengths: parsed.data.strengths ?? "",
@@ -417,10 +429,11 @@ teacherRouter.get(
     const teacherId = await ensureTeacherProfileId(req.user!.id, req.user!.email);
     if (!teacherId) return res.status(404).json({ error: "Teacher profile not found" });
 
-    const booking = await BookingModel.findOne({ _id: bookingId, teacherId }).select("_id").lean();
-    if (!booking) return res.status(404).json({ error: "Booking not found" });
+    const bookingRaw = await BookingModel.findOne({ _id: bookingId, teacherId }).select("_id").lean();
+    if (!bookingRaw || Array.isArray(bookingRaw)) return res.status(404).json({ error: "Booking not found" });
+    const bookingIdObj = (bookingRaw as { _id: Types.ObjectId })._id;
 
-    const report = await ClassReportModel.findOne({ bookingId: booking._id }).lean();
+    const report = await ClassReportModel.findOne({ bookingId: bookingIdObj }).lean();
     return res.json({ report: report ?? null });
   })
 );

@@ -29,7 +29,10 @@ function requireAuthHeaderOrQuery(req: any, res: any, next: any) {
     const role = String(decoded?.role || "");
     const email = String(decoded?.email || "");
     if (!id || !role || !email) return res.status(401).json({ error: "Invalid token" });
-    req.user = { id, role, email } satisfies AuthUser;
+
+    // If possible, cast role to the actual UserRole type, otherwise fallback to string
+    // Assuming UserRole is a union of string literals, try to type-assert safely
+    req.user = { id, role: role as AuthUser["role"], email };
     return next();
   } catch {
     return res.status(401).json({ error: "Invalid token" });

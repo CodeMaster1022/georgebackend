@@ -1,7 +1,13 @@
 import dotenv from "dotenv";
 import { z } from "zod";
+import path from "path";
 
-dotenv.config();
+// Load .env file - try multiple paths for different environments
+if (process.env.NODE_ENV !== "production") {
+  dotenv.config();
+  // Also try loading from parent directory (for Vercel build)
+  dotenv.config({ path: path.resolve(process.cwd(), "../.env") });
+}
 
 const RawEnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),

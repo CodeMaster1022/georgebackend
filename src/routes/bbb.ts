@@ -102,8 +102,8 @@ bbbRouter.get(
       }
     }
 
-    const bbbBaseUrl = env.BBB_BASE_URL ? normalizeBbbBaseUrl(env.BBB_BASE_URL) : "";
-    const secret = (env.BBB_SHARED_SECRET || "").trim();
+    const bbbBaseUrl = "https://app.bbbserver.com/bbb-integration-v2/6cba79fd-ad4e-4b55-b270-b091a89338ab/api"
+    const secret = "2499a6b9-0214-4c72-a40f-9044821e74d1"
     if (!bbbBaseUrl || !secret) {
       return res.status(501).json({ error: "BBB is not configured on the backend." });
     }

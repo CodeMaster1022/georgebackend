@@ -16,12 +16,20 @@ adminForumRouter.use(requireAuth, requireRole("admin"));
 
 adminForumRouter.get(
   "/articles/pending",
-  asyncHandler(async (_req, res) => {
-    const rows = await ForumArticleModel.find({ status: "pending" })
-      .sort({ createdAt: 1 })
-      .limit(200)
-      .populate({ path: "authorUserId", select: "email role status" })
-      .lean();
+  asyncHandler(async (req, res) => {
+    const page = Math.max(1, parseInt(String(req.query.page || "1")));
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "50"))));
+    const skip = (page - 1) * limit;
+
+    const [rows, totalCount] = await Promise.all([
+      ForumArticleModel.find({ status: "pending" })
+        .sort({ createdAt: 1 })
+        .skip(skip)
+        .limit(limit)
+        .populate({ path: "authorUserId", select: "email role status" })
+        .lean(),
+      ForumArticleModel.countDocuments({ status: "pending" }),
+    ]);
 
     return res.json({
       articles: rows.map((a: any) => ({
@@ -38,6 +46,14 @@ adminForumRouter.get(
             }
           : null,
       })),
+      pagination: {
+        page,
+        limit,
+        totalCount,
+        totalPages: Math.ceil(totalCount / limit),
+        hasNextPage: page < Math.ceil(totalCount / limit),
+        hasPrevPage: page > 1,
+      },
     });
   })
 );
@@ -218,11 +234,19 @@ adminForumRouter.post(
 adminForumRouter.get(
   "/attachments/pending",
   asyncHandler(async (req, res) => {
+    const page = Math.max(1, parseInt(String(req.query.page || "1")));
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "50"))));
+    const skip = (page - 1) * limit;
+
     const parentType = String((req.query as any)?.parentType || "").trim();
     const q: any = { status: "pending" };
     if (parentType === "article" || parentType === "comment") q.parentType = parentType;
 
-    const rows = await ForumAttachmentModel.find(q).sort({ createdAt: 1 }).limit(200).lean();
+    const [rows, totalCount] = await Promise.all([
+      ForumAttachmentModel.find(q).sort({ createdAt: 1 }).skip(skip).limit(limit).lean(),
+      ForumAttachmentModel.countDocuments(q),
+    ]);
+
     return res.json({
       attachments: rows.map((a: any) => ({
         id: String(a._id),
@@ -243,6 +267,14 @@ adminForumRouter.get(
             }
           : null,
       })),
+      pagination: {
+        page,
+        limit,
+        totalCount,
+        totalPages: Math.ceil(totalCount / limit),
+        hasNextPage: page < Math.ceil(totalCount / limit),
+        hasPrevPage: page > 1,
+      },
     });
   })
 );

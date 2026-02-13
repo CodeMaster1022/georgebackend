@@ -43,6 +43,11 @@ const RawEnvSchema = z.object({
   // Optional: salt for deriving per-meeting moderator/attendee passwords.
   // If omitted, BBB_SHARED_SECRET is used as the salt.
   MEETING_PASSWORD_SALT: z.string().optional(),
+
+  // --- Cloudinary (forum uploads; optional) ---
+  CLOUDINARY_CLOUD_NAME: z.string().optional(),
+  CLOUDINARY_API_KEY: z.string().optional(),
+  CLOUDINARY_API_SECRET: z.string().optional(),
 });
 
 export type Env = {
@@ -64,6 +69,9 @@ export type Env = {
   BBB_SHARED_SECRET?: string;
   PUBLIC_BACKEND_URL?: string;
   MEETING_PASSWORD_SALT?: string;
+  CLOUDINARY_CLOUD_NAME?: string;
+  CLOUDINARY_API_KEY?: string;
+  CLOUDINARY_API_SECRET?: string;
 };
 
 const raw = RawEnvSchema.parse(process.env);
@@ -100,5 +108,8 @@ export const env: Env = {
   BBB_SHARED_SECRET: raw.BBB_SHARED_SECRET,
   PUBLIC_BACKEND_URL: raw.PUBLIC_BACKEND_URL,
   MEETING_PASSWORD_SALT: raw.MEETING_PASSWORD_SALT,
+  CLOUDINARY_CLOUD_NAME: raw.CLOUDINARY_CLOUD_NAME,
+  CLOUDINARY_API_KEY: raw.CLOUDINARY_API_KEY,
+  CLOUDINARY_API_SECRET: raw.CLOUDINARY_API_SECRET,
 };
 

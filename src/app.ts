@@ -15,6 +15,8 @@ import { creditsRouter } from "./routes/credits";
 import { integrationsRouter } from "./routes/integrations";
 import { teacherRouter } from "./routes/teacher";
 import { bbbRouter } from "./routes/bbb";
+import { forumRouter } from "./routes/forum";
+import { adminForumRouter } from "./routes/adminForum";
 
 export async function createApp() {
   await connectDb();
@@ -41,6 +43,8 @@ export async function createApp() {
   app.use("/integrations", integrationsRouter);
   app.use("/teacher", teacherRouter);
   app.use("/bbb", bbbRouter);
+  app.use("/forum", forumRouter);
+  app.use("/admin/forum", adminForumRouter);
 
   app.use((req, res) => {
     res.status(404).json({ error: "Not Found" });

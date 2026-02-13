@@ -77,6 +77,10 @@ adminRouter.get("/users/:id", asyncHandler(async (req, res) => {
   if (!user) return res.status(404).json({ error: "User not found" });
 
   let profile = null;
+  if (Array.isArray(user)) {
+    return res.status(500).json({ error: "Unexpected array result" });
+  }
+  
   if (user.role === "teacher") {
     profile = await TeacherProfileModel.findOne({ userId: user._id }).lean();
   } else if (user.role === "student") {

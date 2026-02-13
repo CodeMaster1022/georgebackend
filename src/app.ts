@@ -14,6 +14,7 @@ import { bookingsRouter } from "./routes/bookings";
 import { creditsRouter } from "./routes/credits";
 import { integrationsRouter } from "./routes/integrations";
 import { teacherRouter } from "./routes/teacher";
+import { studentRouter } from "./routes/student";
 import { bbbRouter } from "./routes/bbb";
 import { forumRouter } from "./routes/forum";
 import { adminForumRouter } from "./routes/adminForum";
@@ -42,6 +43,7 @@ export async function createApp() {
   app.use("/credits", creditsRouter);
   app.use("/integrations", integrationsRouter);
   app.use("/teacher", teacherRouter);
+  app.use("/student", studentRouter);
   app.use("/bbb", bbbRouter);
   app.use("/forum", forumRouter);
   app.use("/admin/forum", adminForumRouter);

@@ -9,6 +9,7 @@ const StudentProfileSchema = new Schema(
     canRead: { type: String, enum: ["Yes", "No", ""], default: "" },
     homeschoolFunding: { type: String, enum: ["Yes", "No", ""], default: "" },
     questionnaire: { type: String, trim: true, default: "" },
+    photoUrl: { type: String, trim: true, default: "" },
     parentContact: {
       name: { type: String, trim: true, default: "" },
       phone: { type: String, trim: true, default: "" },

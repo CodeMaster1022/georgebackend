@@ -15,7 +15,7 @@ const RawEnvSchema = z.object({
   MONGO_URI: z.string().min(1).optional(),
   MONGODB_URI: z.string().min(1).optional(),
   JWT_SECRET: z.string().optional(),
-  CORS_ORIGIN: z.string().min(1).default("http://localhost:3000"),
+  CORS_ORIGIN: z.string().min(1).default("https://george-production.up.railway.app/"),
   EMAIL_HOST: z.string().optional(),
   EMAIL_PORT: z.coerce.number().int().positive().optional(),
   EMAIL_USER: z.string().optional(),

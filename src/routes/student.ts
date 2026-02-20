@@ -5,6 +5,9 @@ import { Types } from "mongoose";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { asyncHandler } from "../utils/asyncHandler";
 import { StudentProfileModel } from "../models/StudentProfile";
+import { BookingModel } from "../models/Booking";
+import { ClassReportModel } from "../models/ClassReport";
+import { LessonRatingModel } from "../models/LessonRating";
 
 export const studentRouter = Router();
 
@@ -30,14 +33,29 @@ async function ensureStudentProfileId(userId: string, email: string) {
   }
 }
 
-// Get student profile
+// Get student profile (with stats: lessonsCompleted, feedbackGiven, rating from teachers)
 studentRouter.get(
   "/profile",
   asyncHandler(async (req, res) => {
     await ensureStudentProfileId(req.user!.id, req.user!.email);
     const profile = await StudentProfileModel.findOne({ userId: req.user!.id }).lean();
     if (!profile) return res.status(404).json({ error: "Student profile not found" });
-    return res.json({ profile });
+    const userId = new Types.ObjectId(req.user!.id);
+    const [lessonsCompleted, feedbackGiven, ratingAgg] = await Promise.all([
+      BookingModel.countDocuments({ studentUserId: userId, status: "completed" }),
+      LessonRatingModel.countDocuments({ fromUserId: userId, fromRole: "student" }),
+      LessonRatingModel.aggregate([
+        { $match: { studentUserId: userId, fromRole: "teacher" } },
+        { $group: { _id: null, avg: { $avg: "$rating" }, count: { $sum: 1 } } },
+      ]),
+    ]);
+    const ratingAvg = ratingAgg[0]?.avg != null ? Math.round(Number(ratingAgg[0].avg) * 100) / 100 : 0;
+    const ratingCount = ratingAgg[0]?.count ?? 0;
+    const out = {
+      ...profile,
+      stats: { lessonsCompleted, feedbackGiven, ratingAvg, ratingCount },
+    };
+    return res.json({ profile: out });
   })
 );
 
@@ -72,5 +90,37 @@ studentRouter.put(
     ).lean();
     if (!profile) return res.status(404).json({ error: "Student profile not found" });
     return res.json({ profile });
+  })
+);
+
+// Get class report for a booking (only if booking belongs to current student)
+studentRouter.get(
+  "/reports",
+  asyncHandler(async (req, res) => {
+    const bookingId = typeof req.query.bookingId === "string" ? req.query.bookingId.trim() : "";
+    if (!bookingId || !Types.ObjectId.isValid(bookingId)) {
+      return res.status(400).json({ error: "Invalid bookingId" });
+    }
+    const studentUserId = req.user!.id;
+    const booking = await BookingModel.findOne({
+      _id: new Types.ObjectId(bookingId),
+      studentUserId: new Types.ObjectId(studentUserId),
+    })
+      .select("_id")
+      .lean();
+    if (!booking) return res.status(404).json({ error: "Booking not found" });
+    const reportRaw = await ClassReportModel.findOne({ bookingId: new Types.ObjectId(bookingId) }).lean();
+    const report = reportRaw as { _id: Types.ObjectId; summary?: string; homework?: string; strengths?: string; updatedAt?: Date } | null;
+    return res.json({
+      report: report
+        ? {
+            id: String(report._id),
+            summary: report.summary ?? "",
+            homework: report.homework ?? "",
+            strengths: report.strengths ?? "",
+            updatedAt: report.updatedAt,
+          }
+        : null,
+    });
   })
 );

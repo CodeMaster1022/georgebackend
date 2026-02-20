@@ -8,8 +8,11 @@ import { BookingModel } from "../models/Booking";
 import { CreditTransactionModel } from "../models/CreditTransaction";
 import { asyncHandler } from "../utils/asyncHandler";
 import { TeacherProfileModel } from "../models/TeacherProfile";
+import { StudentProfileModel } from "../models/StudentProfile";
+import { LessonRatingModel } from "../models/LessonRating";
 import { env } from "../config/env";
 import { BbbClient } from "../bbb/client";
+import { persistAndNotify, resolveTeacherUserId } from "../ws/emit";
 import { deriveMeetingPasswords } from "../bbb/meetingPasswords";
 
 export const bookingsRouter = Router();
@@ -66,6 +69,17 @@ bookingsRouter.get(
       .populate({ path: "teacherId", select: "name country photoUrl stats" })
       .lean();
 
+    const bookingIds = (bookings as any[]).map((b) => b._id);
+    const ratings = await LessonRatingModel.find({ bookingId: { $in: bookingIds } })
+      .select("bookingId fromRole")
+      .lean();
+    const studentRatedSet = new Set(
+      (ratings as any[]).filter((r: any) => r.fromRole === "student").map((r: any) => String(r.bookingId))
+    );
+    const teacherRatedSet = new Set(
+      (ratings as any[]).filter((r: any) => r.fromRole === "teacher").map((r: any) => String(r.bookingId))
+    );
+
     const rows = (bookings as any[]).map((b) => ({
       id: String(b._id),
       status: String(b.status || ""),
@@ -73,6 +87,8 @@ bookingsRouter.get(
       bookedAt: b.bookedAt,
       cancelledAt: b.cancelledAt ?? null,
       calendarEventId: String(b.calendarEventId || ""),
+      studentRated: studentRatedSet.has(String(b._id)),
+      teacherRated: teacherRatedSet.has(String(b._id)),
       teacher: b.teacherId
         ? {
             id: String(b.teacherId._id),
@@ -269,6 +285,22 @@ bookingsRouter.post("/", asyncHandler(async (req, res) => {
         // eslint-disable-next-line no-console
         console.error("[booking->bbb] creation failed", msg);
       }
+      // Notify teacher of new booking (include student name)
+      const teacherProfileId = result.body.booking.teacherId;
+      const teacherUserId = await resolveTeacherUserId(teacherProfileId);
+      const studentProfile = (await StudentProfileModel.findOne({ userId: studentUserId }).select("nickname").lean()) as { nickname?: string } | null;
+      const studentName = String(studentProfile?.nickname || "").trim() || String(req.user?.email || "").split("@")[0] || "A student";
+      // eslint-disable-next-line no-console
+      console.log("[bookings] new_booking notify", { teacherProfileId, teacherUserId: teacherUserId ?? "null" });
+      if (teacherUserId) {
+        await persistAndNotify([teacherUserId], "new_booking", {
+          bookingId: result.body.booking.id,
+          sessionId: result.body.booking.sessionId,
+          startAt: result.body.session?.startAt,
+          endAt: result.body.session?.endAt,
+          studentName,
+        });
+      }
     }
 
     return res.status(result.status).json(result.body);
@@ -325,9 +357,63 @@ bookingsRouter.post("/:id/cancel", asyncHandler(async (req, res) => {
     });
 
     if (!result) return res.status(500).json({ error: "Unknown error" });
+    if (result.status === 200) {
+      const bookingDoc = (await BookingModel.findById(bookingIdStr).select("teacherId").lean()) as { teacherId?: Types.ObjectId } | null;
+      const teacherUserId = bookingDoc?.teacherId ? await resolveTeacherUserId(bookingDoc.teacherId) : null;
+      if (teacherUserId) {
+        const cancelStudentProfile = (await StudentProfileModel.findOne({ userId: studentUserId }).select("nickname").lean()) as { nickname?: string } | null;
+        const studentName = String(cancelStudentProfile?.nickname || "").trim() || String(req.user?.email || "").split("@")[0] || "A student";
+        await persistAndNotify([teacherUserId], "booking_cancelled", { bookingId: bookingIdStr, studentName });
+      }
+    }
     return res.status(result.status).json(result.body);
   } finally {
     mongoSession.endSession();
   }
 }));
 
+const StudentRateSchema = z.object({
+  rating: z.number().int().min(1).max(5),
+  comment: z.string().trim().max(1000).optional(),
+});
+
+// Student rates teacher for a completed booking
+bookingsRouter.post(
+  "/:id/rate",
+  asyncHandler(async (req, res) => {
+    const studentUserId = req.user!.id;
+    const id = req.params.id;
+    if (!Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid booking id" });
+    const parsed = StudentRateSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid input", details: parsed.error.flatten() });
+    const booking = await BookingModel.findOne({ _id: id, studentUserId: new Types.ObjectId(studentUserId) }).lean();
+    if (!booking) return res.status(404).json({ error: "Booking not found" });
+    const b = booking as any;
+    if (b.status !== "completed") {
+      return res.status(400).json({ error: "Can only rate completed lessons" });
+    }
+    const existing = await LessonRatingModel.findOne({ bookingId: new Types.ObjectId(id), fromRole: "student" }).lean();
+    if (existing) return res.status(400).json({ error: "You already rated this lesson" });
+    const teacherId = b.teacherId;
+    await LessonRatingModel.create({
+      bookingId: new Types.ObjectId(id),
+      teacherId,
+      studentUserId: new Types.ObjectId(studentUserId),
+      fromRole: "student",
+      fromUserId: new Types.ObjectId(studentUserId),
+      rating: parsed.data.rating,
+      comment: parsed.data.comment ?? "",
+    });
+    const agg = await LessonRatingModel.aggregate([
+      { $match: { teacherId, fromRole: "student" } },
+      { $group: { _id: null, avg: { $avg: "$rating" }, count: { $sum: 1 } } },
+    ]);
+    const avg = agg[0]?.avg ?? 0;
+    const count = agg[0]?.count ?? 0;
+    await TeacherProfileModel.updateOne(
+      { _id: teacherId },
+      { $set: { "stats.ratingAvg": Math.round(avg * 100) / 100, "stats.ratingCount": count } }
+    );
+    return res.json({ ok: true });
+  })
+);

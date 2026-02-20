@@ -11,9 +11,11 @@ import { ClassSessionModel } from "../models/ClassSession";
 import { BookingModel } from "../models/Booking";
 import { StudentProfileModel } from "../models/StudentProfile";
 import { ClassReportModel } from "../models/ClassReport";
+import { LessonRatingModel } from "../models/LessonRating";
 import { UserModel } from "../models/User";
 import { decryptString } from "../utils/crypto";
 import { env } from "../config/env";
+import { persistAndNotify } from "../ws/emit";
 
 export const teacherRouter = Router();
 
@@ -50,10 +52,16 @@ async function ensureTeacherProfileId(userId: string, email: string) {
 teacherRouter.get(
   "/profile",
   asyncHandler(async (req, res) => {
-    await ensureTeacherProfileId(req.user!.id, req.user!.email);
+    const teacherId = await ensureTeacherProfileId(req.user!.id, req.user!.email);
+    if (!teacherId) return res.status(404).json({ error: "Teacher profile not found" });
     const profile = await TeacherProfileModel.findOne({ userId: req.user!.id }).lean();
     if (!profile) return res.status(404).json({ error: "Teacher profile not found" });
-    return res.json({ profile });
+    const lessonsCompleted = await BookingModel.countDocuments({
+      teacherId: new Types.ObjectId(teacherId),
+      status: "completed",
+    });
+    const out = { ...profile, stats: { ...(profile as any).stats, lessonsCompleted } };
+    return res.json({ profile: out });
   })
 );
 
@@ -243,6 +251,13 @@ teacherRouter.patch(
     ).lean();
 
     if (!session) return res.status(404).json({ error: "Session not found" });
+    if (parsed.data.status === "cancelled") {
+      const bookings = await BookingModel.find({ sessionId: id, status: "booked" }).select("studentUserId").lean();
+      const studentUserIds = bookings.map((b: any) => String(b.studentUserId)).filter(Boolean);
+      if (studentUserIds.length) {
+        await persistAndNotify(studentUserIds, "session_cancelled", { sessionId: id });
+      }
+    }
     return res.json({ session });
   })
 );
@@ -349,6 +364,17 @@ teacherRouter.get(
       .lean();
     const nicknameByUserId = new Map(studentProfiles.map((p: any) => [String(p.userId), p.nickname]));
 
+    const bookingIds = bookings.map((b: any) => b._id);
+    const ratings = await LessonRatingModel.find({ bookingId: { $in: bookingIds } })
+      .select("bookingId fromRole")
+      .lean();
+    const teacherRatedSet = new Set(
+      (ratings as any[]).filter((r: any) => r.fromRole === "teacher").map((r: any) => String(r.bookingId))
+    );
+    const studentRatedSet = new Set(
+      (ratings as any[]).filter((r: any) => r.fromRole === "student").map((r: any) => String(r.bookingId))
+    );
+
     const rows = bookings.map((b: any) => ({
       id: String(b._id),
       status: b.status,
@@ -356,6 +382,8 @@ teacherRouter.get(
       bookedAt: b.bookedAt,
       studentUserId: String(b.studentUserId),
       studentNickname: nicknameByUserId.get(String(b.studentUserId)) || "",
+      teacherRated: teacherRatedSet.has(String(b._id)),
+      studentRated: studentRatedSet.has(String(b._id)),
       session: b.sessionId
         ? {
             id: String(b.sessionId._id),
@@ -369,6 +397,62 @@ teacherRouter.get(
     }));
 
     return res.json({ bookings: rows });
+  })
+);
+
+// Mark booking as completed (done lesson) - teacher only
+teacherRouter.post(
+  "/bookings/:id/complete",
+  asyncHandler(async (req, res) => {
+    const teacherId = await ensureTeacherProfileId(req.user!.id, req.user!.email);
+    if (!teacherId) return res.status(404).json({ error: "Teacher profile not found" });
+    const id = req.params.id;
+    if (!Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid booking id" });
+    const booking = await BookingModel.findOne({ _id: id, teacherId }).lean();
+    if (!booking) return res.status(404).json({ error: "Booking not found" });
+    if ((booking as any).status !== "booked") {
+      return res.status(400).json({ error: "Only booked lessons can be marked complete" });
+    }
+    await BookingModel.updateOne({ _id: id, teacherId }, { $set: { status: "completed" } });
+    await persistAndNotify([String((booking as any).studentUserId)], "lesson_completed", {
+      bookingId: id,
+    });
+    return res.json({ ok: true, bookingId: id });
+  })
+);
+
+const TeacherRateStudentSchema = z.object({
+  rating: z.number().int().min(1).max(5),
+  comment: z.string().trim().max(1000).optional(),
+});
+
+// Teacher rates student for a completed booking
+teacherRouter.post(
+  "/bookings/:id/rate",
+  asyncHandler(async (req, res) => {
+    const teacherId = await ensureTeacherProfileId(req.user!.id, req.user!.email);
+    if (!teacherId) return res.status(404).json({ error: "Teacher profile not found" });
+    const id = req.params.id;
+    if (!Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid booking id" });
+    const parsed = TeacherRateStudentSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid input", details: parsed.error.flatten() });
+    const booking = await BookingModel.findOne({ _id: id, teacherId }).lean();
+    if (!booking) return res.status(404).json({ error: "Booking not found" });
+    if ((booking as any).status !== "completed") {
+      return res.status(400).json({ error: "Can only rate completed lessons" });
+    }
+    const existing = await LessonRatingModel.findOne({ bookingId: id, fromRole: "teacher" }).lean();
+    if (existing) return res.status(400).json({ error: "You already rated this lesson" });
+    await LessonRatingModel.create({
+      bookingId: new Types.ObjectId(id),
+      teacherId: new Types.ObjectId(teacherId),
+      studentUserId: (booking as any).studentUserId,
+      fromRole: "teacher",
+      fromUserId: new Types.ObjectId(req.user!.id),
+      rating: parsed.data.rating,
+      comment: parsed.data.comment ?? "",
+    });
+    return res.json({ ok: true });
   })
 );
 
@@ -416,6 +500,13 @@ teacherRouter.post(
       { upsert: true, new: true }
     ).lean();
 
+    const studentUserId = booking.studentUserId ? String(booking.studentUserId) : null;
+    if (studentUserId && report) {
+      await persistAndNotify([studentUserId], "class_report_submitted", {
+        bookingId: String(booking._id),
+        reportId: String((report as any)._id),
+      });
+    }
     return res.json({ report });
   })
 );

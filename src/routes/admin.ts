@@ -165,21 +165,72 @@ adminRouter.post("/users/:id/credits", asyncHandler(async (req, res) => {
   return res.json({ ok: true, credits: profile.credits });
 }));
 
-// GET /admin/stats - Dashboard statistics
+// GET /admin/stats - Dashboard statistics + chart data
 adminRouter.get("/stats", asyncHandler(async (req, res) => {
-  const [totalUsers, totalTeachers, totalStudents, totalBookings] = await Promise.all([
+  const days = 30;
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  start.setHours(0, 0, 0, 0);
+  const startPrev = new Date(start);
+  startPrev.setDate(startPrev.getDate() - days);
+  startPrev.setHours(0, 0, 0, 0);
+
+  const [
+    totalUsers,
+    totalTeachers,
+    totalStudents,
+    totalBookings,
+    activeUsers,
+    recentUsers,
+    registrationsByDay,
+    bookingsByDay,
+    completedBookings,
+    last30Registrations,
+    prev30Registrations,
+    last30Bookings,
+    prev30Bookings,
+  ] = await Promise.all([
     UserModel.countDocuments(),
     UserModel.countDocuments({ role: "teacher" }),
     UserModel.countDocuments({ role: "student" }),
     BookingModel.countDocuments(),
+    UserModel.countDocuments({ status: "active" }),
+    UserModel.find()
+      .sort({ createdAt: -1 })
+      .limit(8)
+      .select("email role createdAt")
+      .lean(),
+    UserModel.aggregate([
+      { $match: { createdAt: { $gte: start } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]),
+    BookingModel.aggregate([
+      { $match: { bookedAt: { $gte: start } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$bookedAt" } }, count: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]),
+    BookingModel.countDocuments({ status: "completed" }),
+    UserModel.countDocuments({ createdAt: { $gte: start } }),
+    UserModel.countDocuments({ createdAt: { $gte: startPrev, $lt: start } }),
+    BookingModel.countDocuments({ bookedAt: { $gte: start } }),
+    BookingModel.countDocuments({ bookedAt: { $gte: startPrev, $lt: start } }),
   ]);
 
-  const activeUsers = await UserModel.countDocuments({ status: "active" });
-  const recentUsers = await UserModel.find()
-    .sort({ createdAt: -1 })
-    .limit(5)
-    .select("email role createdAt")
-    .lean();
+  // Fill in missing days with 0 for chart
+  const registrationsMap = new Map((registrationsByDay as { _id: string; count: number }[]).map((r) => [r._id, r.count]));
+  const bookingsMap = new Map((bookingsByDay as { _id: string; count: number }[]).map((b) => [b._id, b.count]));
+  const chartDays: { date: string; registrations: number; bookings: number }[] = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    const dateStr = d.toISOString().slice(0, 10);
+    chartDays.push({
+      date: dateStr,
+      registrations: registrationsMap.get(dateStr) ?? 0,
+      bookings: bookingsMap.get(dateStr) ?? 0,
+    });
+  }
 
   return res.json({
     totalUsers,
@@ -187,7 +238,13 @@ adminRouter.get("/stats", asyncHandler(async (req, res) => {
     totalStudents,
     totalBookings,
     activeUsers,
+    completedBookings,
     recentUsers,
+    chartData: chartDays,
+    last30Registrations,
+    prev30Registrations,
+    last30Bookings,
+    prev30Bookings,
   });
 }));
 
@@ -245,34 +302,73 @@ adminRouter.get("/teachers", asyncHandler(async (req, res) => {
 
 // GET /admin/bookings - List all bookings with pagination
 adminRouter.get("/bookings", asyncHandler(async (req, res) => {
-  const page = Math.max(1, parseInt(String(req.query.page || "1")));
-  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "20"))));
-  const skip = (page - 1) * limit;
+  try {
+    const page = Math.max(1, parseInt(String(req.query.page || "1"), 10));
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "20"), 10)));
+    const skip = (page - 1) * limit;
 
-  // Build filter query
-  const filter: any = {};
-  if (req.query.status) filter.status = req.query.status;
+    // Build filter query
+    const filter: any = {};
+    if (req.query.status) filter.status = req.query.status;
 
-  const [bookings, totalCount] = await Promise.all([
-    BookingModel.find(filter)
-      .sort({ bookedAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .populate("studentUserId", "email")
-      .populate("teacherUserId", "email")
-      .lean(),
-    BookingModel.countDocuments(filter),
-  ]);
+    const [rawBookings, totalCount] = await Promise.all([
+      BookingModel.find(filter)
+        .sort({ bookedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("studentUserId", "email")
+        .populate({ path: "teacherId", select: "userId", populate: { path: "userId", select: "email" } })
+        .populate("sessionId", "startAt endAt")
+        .lean(),
+      BookingModel.countDocuments(filter),
+    ]);
 
-  return res.json({
-    bookings,
-    pagination: {
-      page,
-      limit,
-      totalCount,
-      totalPages: Math.ceil(totalCount / limit),
-      hasNextPage: page < Math.ceil(totalCount / limit),
-      hasPrevPage: page > 1,
-    },
-  });
+    const totalPages = Math.ceil(totalCount / limit) || 1;
+
+    // Map to shape expected by frontend: teacherUserId (from teacherId.userId), startTime/endTime (from sessionId)
+    const bookings = (rawBookings as any[]).map((b) => {
+      const teacherDoc = b.teacherId && typeof b.teacherId === "object" ? b.teacherId : null;
+      const userDoc = teacherDoc?.userId && typeof teacherDoc.userId === "object" ? teacherDoc.userId : null;
+      const teacherUserId =
+        userDoc && (userDoc._id || userDoc.email)
+          ? { _id: userDoc._id ?? b.teacherId, email: userDoc.email ?? "" }
+          : null;
+      const session = b.sessionId && typeof b.sessionId === "object" ? b.sessionId : null;
+      const sessionId = session?._id ?? b.sessionId ?? null;
+      return {
+        _id: b._id,
+        sessionId,
+        studentUserId: b.studentUserId ?? { _id: null, email: "" },
+        teacherUserId,
+        startTime: session?.startAt ?? null,
+        endTime: session?.endAt ?? null,
+        status: b.status ?? "booked",
+        priceCredits: b.priceCredits ?? 0,
+        creditsUsed: b.priceCredits ?? 0,
+        bookedAt: b.bookedAt,
+        cancelledAt: b.cancelledAt ?? undefined,
+        completedAt: b.updatedAt ?? undefined,
+        bbbMeetingId: null,
+      };
+    });
+
+    return res.json({
+      bookings,
+      pagination: {
+        page,
+        limit,
+        totalCount,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      },
+    });
+  } catch (err: any) {
+    const message = err?.message ?? String(err);
+    console.error("[GET /admin/bookings]", err);
+    return res.status(500).json({
+      error: "Internal Server Error",
+      details: message,
+    });
+  }
 }));

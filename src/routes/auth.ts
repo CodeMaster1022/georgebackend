@@ -10,6 +10,7 @@ import { TeacherProfileModel } from "../models/TeacherProfile";
 import { StudentProfileModel } from "../models/StudentProfile";
 import { EmailVerificationCodeModel } from "../models/EmailVerificationCode";
 import { asyncHandler } from "../utils/asyncHandler";
+import { sendVerificationCodeEmail } from "../services/mailer";
 import { google } from "googleapis";
 import { encryptString } from "../utils/crypto";
 
@@ -61,11 +62,20 @@ authRouter.post("/register", asyncHandler(async (req, res) => {
       },
       { upsert: true, new: true }
     );
+    let emailSent = true;
+    let devFallback = false;
+    try {
+      const result = await sendVerificationCodeEmail(existing.email, code);
+      devFallback = result.devFallback === true;
+    } catch (err) {
+      emailSent = false;
+      console.error("[auth] Failed to send verification email (resend for existing):", err);
+    }
     return res.json({
       pendingVerification: true,
       user: { id: String(existing._id), role: existing.role, email: existing.email },
-      // Temporary: return code to frontend (do not email)
-      verificationCode: code,
+      ...(devFallback ? { verificationCode: code } : {}),
+      ...(emailSent ? {} : { emailError: true }),
     });
   }
 
@@ -104,11 +114,20 @@ authRouter.post("/register", asyncHandler(async (req, res) => {
     { upsert: true, new: true }
   );
 
-  // Temporary: return code to frontend (do not email)
+  let emailSent = true;
+  let devFallback = false;
+  try {
+    const result = await sendVerificationCodeEmail(user.email, code);
+    devFallback = result.devFallback === true;
+  } catch (err) {
+    emailSent = false;
+    console.error("[auth] Failed to send verification email on register:", err);
+  }
   return res.status(201).json({
     pendingVerification: true,
     user: { id: String(user._id), role: user.role, email: user.email },
-    verificationCode: code,
+    ...(devFallback ? { verificationCode: code } : {}),
+    ...(emailSent ? {} : { emailError: true }),
   });
 }));
 
@@ -189,8 +208,20 @@ authRouter.post("/resend-code", asyncHandler(async (req, res) => {
     },
     { upsert: true, new: true }
   );
-  // Temporary: return code to frontend (do not email)
-  return res.json({ ok: true, verificationCode: code });
+  let emailSent = true;
+  let devFallback = false;
+  try {
+    const result = await sendVerificationCodeEmail(user.email, code);
+    devFallback = result.devFallback === true;
+  } catch (err) {
+    emailSent = false;
+    console.error("[auth] Failed to send verification email (resend):", err);
+  }
+  return res.json({
+    ok: true,
+    ...(devFallback ? { verificationCode: code } : {}),
+    ...(emailSent ? {} : { emailError: true }),
+  });
 }));
 
 const LoginSchema = z.object({

@@ -530,6 +530,201 @@ teacherRouter.get(
 );
 
 // -----------------------
+// Dashboard stats (KPIs + charts)
+// -----------------------
+function getWeekStart(d: Date): Date {
+  const x = new Date(d);
+  const day = x.getUTCDay();
+  x.setUTCDate(x.getUTCDate() - day);
+  x.setUTCHours(0, 0, 0, 0);
+  return x;
+}
+
+teacherRouter.get(
+  "/dashboard/stats",
+  asyncHandler(async (req, res) => {
+    const teacherId = await ensureTeacherProfileId(req.user!.id, req.user!.email);
+    if (!teacherId) return res.status(404).json({ error: "Teacher profile not found" });
+    const tid = new Types.ObjectId(teacherId);
+
+    const now = new Date();
+    const thisWeekStart = getWeekStart(now);
+    const prevWeekStart = new Date(thisWeekStart);
+    prevWeekStart.setUTCDate(prevWeekStart.getUTCDate() - 7);
+    const prevWeekEnd = new Date(thisWeekStart.getTime() - 1);
+
+    const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+    const todayEnd = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000 - 1);
+
+    const [
+      thisWeekSessions,
+      prevWeekSessions,
+      thisWeekBookings,
+      prevWeekBookings,
+      todayOpen,
+      todayBooked,
+      revenueByDay,
+      guestsByDay,
+      sessionsByDay,
+      completedThisWeekRes,
+      completedPrevWeekRes,
+    ] = await Promise.all([
+      ClassSessionModel.countDocuments({
+        teacherId: tid,
+        startAt: { $gte: thisWeekStart, $lte: now },
+      }),
+      ClassSessionModel.countDocuments({
+        teacherId: tid,
+        startAt: { $gte: prevWeekStart, $lte: prevWeekEnd },
+      }),
+      BookingModel.countDocuments({
+        teacherId: tid,
+        bookedAt: { $gte: thisWeekStart, $lte: now },
+      }),
+      BookingModel.countDocuments({
+        teacherId: tid,
+        bookedAt: { $gte: prevWeekStart, $lte: prevWeekEnd },
+      }),
+      ClassSessionModel.countDocuments({
+        teacherId: tid,
+        startAt: { $gte: todayStart, $lte: todayEnd },
+        status: "open",
+      }),
+      ClassSessionModel.countDocuments({
+        teacherId: tid,
+        startAt: { $gte: todayStart, $lte: todayEnd },
+        status: "booked",
+      }),
+      BookingModel.aggregate([
+        { $match: { teacherId: tid, status: "completed" } },
+        { $lookup: { from: "classsessions", localField: "sessionId", foreignField: "_id", as: "s" } },
+        { $unwind: "$s" },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$s.startAt" } },
+            revenue: { $sum: "$priceCredits" },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      BookingModel.aggregate([
+        { $match: { teacherId: tid } },
+        { $lookup: { from: "classsessions", localField: "sessionId", foreignField: "_id", as: "s" } },
+        { $unwind: "$s" },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$s.startAt" } },
+            guests: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      ClassSessionModel.aggregate([
+        { $match: { teacherId: tid } },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$startAt" } },
+            open: { $sum: { $cond: [{ $eq: ["$status", "open"] }, 1, 0] } },
+            booked: { $sum: { $cond: [{ $eq: ["$status", "booked"] }, 1, 0] } },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      BookingModel.aggregate([
+        { $match: { teacherId: tid, status: "completed" } },
+        { $lookup: { from: "classsessions", localField: "sessionId", foreignField: "_id", as: "s" } },
+        { $unwind: "$s" },
+        { $match: { "s.startAt": { $gte: thisWeekStart, $lte: now } } },
+        { $count: "n" },
+      ]),
+      BookingModel.aggregate([
+        { $match: { teacherId: tid, status: "completed" } },
+        { $lookup: { from: "classsessions", localField: "sessionId", foreignField: "_id", as: "s" } },
+        { $unwind: "$s" },
+        { $match: { "s.startAt": { $gte: prevWeekStart, $lte: prevWeekEnd } } },
+        { $count: "n" },
+      ]),
+    ]);
+
+    const thisWeekCompletedCount = (completedThisWeekRes[0] as { n: number } | undefined)?.n ?? 0;
+    const prevWeekCompletedCount = (completedPrevWeekRes[0] as { n: number } | undefined)?.n ?? 0;
+
+    const sessionsTodayBooked = await ClassSessionModel.find({
+      teacherId: tid,
+      startAt: { $gte: todayStart, $lte: todayEnd },
+      status: "booked",
+    })
+      .select("_id")
+      .lean();
+    const todayGuests = await BookingModel.countDocuments({
+      sessionId: { $in: sessionsTodayBooked.map((s: any) => s._id) },
+    });
+
+    const totalRevenueThisWeek = await BookingModel.aggregate([
+      { $match: { teacherId: tid, status: "completed" } },
+      { $lookup: { from: "classsessions", localField: "sessionId", foreignField: "_id", as: "s" } },
+      { $unwind: "$s" },
+      { $match: { "s.startAt": { $gte: thisWeekStart, $lte: now } } },
+      { $group: { _id: null, total: { $sum: "$priceCredits" } } },
+    ]);
+    const totalRevenue = (totalRevenueThisWeek[0] as { total: number } | undefined)?.total ?? 0;
+
+    const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const completedByDay = await BookingModel.aggregate([
+      { $match: { teacherId: tid, status: "completed" } },
+      { $lookup: { from: "classsessions", localField: "sessionId", foreignField: "_id", as: "s" } },
+      { $unwind: "$s" },
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$s.startAt" } },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+    const completedMap = new Map((completedByDay as { _id: string; count: number }[]).map((c) => [c._id, c.count]));
+    const chartDays: { day: string; date: string; revenue: number; guests: number; open: number; booked: number; completed: number }[] = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(thisWeekStart);
+      d.setUTCDate(d.getUTCDate() + i);
+      const dateStr = d.toISOString().slice(0, 10);
+      const dayName = dayLabels[d.getUTCDay()];
+      const revRow = (revenueByDay as { _id: string; revenue: number }[]).find((r) => r._id === dateStr);
+      const guestRow = (guestsByDay as { _id: string; guests: number }[]).find((g) => g._id === dateStr);
+      const sessRow = (sessionsByDay as { _id: string; open: number; booked: number }[]).find((s) => s._id === dateStr);
+      chartDays.push({
+        day: dayName,
+        date: dateStr,
+        revenue: revRow?.revenue ?? 0,
+        guests: guestRow?.guests ?? 0,
+        open: sessRow?.open ?? 0,
+        booked: sessRow?.booked ?? 0,
+        completed: completedMap.get(dateStr) ?? 0,
+      });
+    }
+
+    return res.json({
+      thisWeek: {
+        sessions: thisWeekSessions,
+        bookings: thisWeekBookings,
+        completed: thisWeekCompletedCount,
+      },
+      previousWeek: {
+        sessions: prevWeekSessions,
+        bookings: prevWeekBookings,
+        completed: prevWeekCompletedCount,
+      },
+      today: {
+        slotsAvailable: todayOpen,
+        slotsBooked: todayBooked,
+        guests: todayGuests,
+      },
+      totalRevenueCredits: totalRevenue,
+      chartData: chartDays,
+    });
+  })
+);
+
+// -----------------------
 // Earnings (basic)
 // -----------------------
 teacherRouter.get(

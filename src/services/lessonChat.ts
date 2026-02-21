@@ -16,7 +16,7 @@ export async function getBookingChatParticipant(
 ): Promise<LessonChatParticipant> {
   const booking = await BookingModel.findById(bookingId).select("studentUserId teacherId").lean();
   if (!booking || Array.isArray(booking)) return { allowed: false };
-  const b = booking as { studentUserId: Types.ObjectId; teacherId: Types.ObjectId };
+  const b = booking as unknown as { studentUserId: Types.ObjectId; teacherId: Types.ObjectId };
   const studentUserId = String(b.studentUserId);
   const teacherUserId = await resolveTeacherUserId(b.teacherId);
   if (currentUserId === studentUserId) {

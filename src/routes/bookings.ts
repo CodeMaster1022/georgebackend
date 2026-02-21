@@ -12,8 +12,10 @@ import { StudentProfileModel } from "../models/StudentProfile";
 import { LessonRatingModel } from "../models/LessonRating";
 import { env } from "../config/env";
 import { BbbClient } from "../bbb/client";
-import { persistAndNotify, resolveTeacherUserId } from "../ws/emit";
+import { persistAndNotify, resolveTeacherUserId, notifyUsers } from "../ws/emit";
 import { deriveMeetingPasswords } from "../bbb/meetingPasswords";
+import { LessonMessageModel } from "../models/LessonMessage";
+import { getBookingChatParticipant } from "../services/lessonChat";
 
 export const bookingsRouter = Router();
 
@@ -308,6 +310,77 @@ bookingsRouter.post("/", asyncHandler(async (req, res) => {
     mongoSession.endSession();
   }
 }));
+
+// Lesson chat: list messages for this booking (student must own the booking)
+bookingsRouter.get(
+  "/:id/messages",
+  asyncHandler(async (req, res) => {
+    const bookingIdStr = req.params.id;
+    if (!Types.ObjectId.isValid(bookingIdStr)) return res.status(400).json({ error: "Invalid booking id" });
+    const participant = await getBookingChatParticipant(new Types.ObjectId(bookingIdStr), req.user!.id);
+    if (!participant.allowed) return res.status(404).json({ error: "Booking not found" });
+
+    const before = typeof req.query.before === "string" ? new Date(req.query.before) : undefined;
+    const limit = Math.min(50, Math.max(1, parseInt(String(req.query.limit || "50"), 10) || 50));
+    const q: any = { bookingId: new Types.ObjectId(bookingIdStr) };
+    if (before) q.createdAt = { $lt: before };
+    const messages = await LessonMessageModel.find(q)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    const rows = (messages as any[]).reverse().map((m) => ({
+      id: String(m._id),
+      bookingId: bookingIdStr,
+      fromUserId: String(m.fromUserId),
+      fromRole: m.fromRole,
+      body: m.body,
+      readAt: m.readAt ?? null,
+      createdAt: m.createdAt,
+    }));
+    return res.json({ messages: rows });
+  })
+);
+
+// Lesson chat: send message (student), then notify teacher via WebSocket
+bookingsRouter.post(
+  "/:id/messages",
+  asyncHandler(async (req, res) => {
+    const bookingIdStr = req.params.id;
+    if (!Types.ObjectId.isValid(bookingIdStr)) return res.status(400).json({ error: "Invalid booking id" });
+    const participant = await getBookingChatParticipant(new Types.ObjectId(bookingIdStr), req.user!.id);
+    if (!participant.allowed) return res.status(404).json({ error: "Booking not found" });
+    if (participant.myRole !== "student") return res.status(403).json({ error: "Forbidden" });
+
+    const body = typeof req.body?.body === "string" ? req.body.body.trim() : "";
+    if (!body || body.length > 5000) return res.status(400).json({ error: "Invalid body (max 5000 chars)" });
+
+    const doc = await LessonMessageModel.create({
+      bookingId: new Types.ObjectId(bookingIdStr),
+      fromUserId: new Types.ObjectId(req.user!.id),
+      fromRole: "student",
+      body,
+    });
+    const payload = {
+      bookingId: bookingIdStr,
+      messageId: String(doc._id),
+      fromRole: "student",
+      body: body.slice(0, 200),
+      createdAt: (doc as any).createdAt,
+    };
+    if (participant.otherUserId) notifyUsers([participant.otherUserId], "lesson_message", payload);
+    return res.status(201).json({
+      message: {
+        id: String(doc._id),
+        bookingId: bookingIdStr,
+        fromUserId: req.user!.id,
+        fromRole: "student",
+        body: doc.body,
+        readAt: (doc as any).readAt ?? null,
+        createdAt: (doc as any).createdAt,
+      },
+    });
+  })
+);
 
 bookingsRouter.post("/:id/cancel", asyncHandler(async (req, res) => {
   const bookingIdStr = req.params.id;

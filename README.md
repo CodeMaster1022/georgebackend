@@ -23,7 +23,7 @@ npm install
 npm run dev
 ```
 
-The API will run at `http://localhost:4000` by default.
+The API will run at `https://georgebackend-2.onrender.com` by default.
 
 ## API (current)
 
